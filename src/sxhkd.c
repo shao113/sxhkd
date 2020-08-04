@@ -33,6 +33,8 @@
 #include <fcntl.h>
 #include <signal.h>
 #include <stdbool.h>
+#include <errno.h>
+#include <string.h>
 #include "parse.h"
 #include "grab.h"
 
@@ -52,7 +54,8 @@ int mapping_count;
 int timeout;
 
 hotkey_t *hotkeys_head, *hotkeys_tail;
-bool running, grabbed, toggle_grab, reload, bell, chained, locked;
+bool grabbed, chained, locked;
+volatile sig_atomic_t running, toggle_grab, reload, bell;
 xcb_keysym_t abort_keysym;
 chord_t *abort_chord;
 
@@ -130,13 +133,6 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	signal(SIGINT, hold);
-	signal(SIGHUP, hold);
-	signal(SIGTERM, hold);
-	signal(SIGUSR1, hold);
-	signal(SIGUSR2, hold);
-	signal(SIGALRM, hold);
-
 	setup();
 	get_standard_keysyms();
 	get_lock_fields();
@@ -153,14 +149,19 @@ int main(int argc, char *argv[])
 
 	reload = toggle_grab = bell = chained = locked = false;
 	running = true;
+	
+	sigset_t omask;
+	setup_signals(&omask);
 
 	xcb_flush(dpy);
 
 	while (running) {
 		FD_ZERO(&descriptors);
 		FD_SET(fd, &descriptors);
+		
+		int res = pselect(fd + 1, &descriptors, NULL, NULL, NULL, &omask);
 
-		if (select(fd + 1, &descriptors, NULL, NULL, NULL) > 0) {
+		if (res > 0) {
 			while ((evt = xcb_poll_for_event(dpy)) != NULL) {
 				uint8_t event_type = XCB_EVENT_RESPONSE_TYPE(evt);
 				switch (event_type) {
@@ -179,25 +180,23 @@ int main(int argc, char *argv[])
 				}
 				free(evt);
 			}
-		}
+		} else if (res == -1 && errno == EINTR) {
+			// a signal was caught during pselect
+			if (reload) {
+				reload_cmd();
+				reload = false;
+			}
 
-		if (reload) {
-			signal(SIGUSR1, hold);
-			reload_cmd();
-			reload = false;
-		}
+			if (toggle_grab) {
+				toggle_grab_cmd();
+				toggle_grab = false;
+			}
 
-		if (toggle_grab) {
-			signal(SIGUSR2, hold);
-			toggle_grab_cmd();
-			toggle_grab = false;
-		}
-
-		if (bell) {
-			signal(SIGALRM, hold);
-			put_status(TIMEOUT_PREFIX, "Timeout reached");
-			abort_chain();
-			bell = false;
+			if (bell) {
+				put_status(TIMEOUT_PREFIX, "Timeout reached");
+				abort_chain();
+				bell = false;
+			}
 		}
 
 		if (xcb_connection_has_error(dpy)) {
@@ -311,6 +310,34 @@ void cleanup(void)
 		hk = next;
 	}
 	hotkeys_head = hotkeys_tail = NULL;
+}
+
+void setup_signals(sigset_t *omask)
+{
+	struct sigaction sa;
+	sigset_t mask;
+	
+	sigemptyset(&mask);
+	sigaddset(&mask, SIGINT);
+	sigaddset(&mask, SIGHUP);
+	sigaddset(&mask, SIGTERM);
+	sigaddset(&mask, SIGUSR1);
+	sigaddset(&mask, SIGUSR2);
+	sigaddset(&mask, SIGALRM);
+	
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_handler = hold;
+	sa.sa_mask = mask;
+	sa.sa_flags = SA_RESTART;
+	
+	sigaction(SIGINT, &sa, NULL);
+	sigaction(SIGHUP, &sa, NULL);
+	sigaction(SIGTERM, &sa, NULL);
+	sigaction(SIGUSR1, &sa, NULL);
+	sigaction(SIGUSR2, &sa, NULL);
+	sigaction(SIGALRM, &sa, NULL);
+	
+	sigprocmask(SIG_BLOCK, &mask, omask);
 }
 
 void reload_cmd(void)

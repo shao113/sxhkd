@@ -28,6 +28,7 @@
 #include <xcb/xcb_keysyms.h>
 #include <stdio.h>
 #include <stdbool.h>
+#include <signal.h>
 #include "types.h"
 #include "helpers.h"
 
@@ -58,7 +59,8 @@ extern int mapping_count;
 extern int timeout;
 
 extern hotkey_t *hotkeys_head, *hotkeys_tail;
-extern bool running, grabbed, toggle_grab, reload, bell, chained, locked;
+extern bool grabbed, chained, locked;
+extern volatile sig_atomic_t running, toggle_grab, reload, bell;
 extern xcb_keysym_t abort_keysym;
 extern chord_t *abort_chord;
 
@@ -70,6 +72,7 @@ void key_button_event(xcb_generic_event_t *evt, uint8_t event_type);
 void mapping_notify(xcb_generic_event_t *evt);
 void setup(void);
 void cleanup(void);
+void setup_signals(sigset_t *omask);
 void reload_cmd(void);
 void toggle_grab_cmd(void);
 void hold(int sig);
